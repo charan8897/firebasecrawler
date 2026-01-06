@@ -284,7 +284,7 @@ def search_with_retry_chain(user_query: str, firebase_data: Dict, firebase_schem
     return head_node
 
 def search_firebase_targeted(firebase_data, search_terms, target_collections):
-    """Search Firebase data with specific terms and collections, return complete documents"""
+    """Search Firebase data with specific terms and collections - keeps ALL matching fields per document"""
     results = {}
     
     for col_name in target_collections:
@@ -292,38 +292,52 @@ def search_firebase_targeted(firebase_data, search_terms, target_collections):
             continue
             
         docs = firebase_data[col_name]
-        matched_doc_ids = set()
+        doc_matches = {}  # {doc_id: [all matches for this doc]}
         
         for doc in docs:
-            found = False
             for search_term in search_terms:
                 search_str = str(search_term).lower().strip()
                 # Remove periods and special characters for flexible matching
                 search_str_clean = search_str.replace('.', '').replace(',', '').replace("'", '')
                 
+                doc_id = doc.get('doc_id', 'N/A')
+                if doc_id not in doc_matches:
+                    doc_matches[doc_id] = []
+                
                 for key, value in doc.items():
                     if isinstance(value, str):
                         value_clean = value.lower().replace('.', '').replace(',', '').replace("'", '')
                         if search_str in value.lower() or search_str_clean in value_clean:
-                            matched_doc_ids.add(doc.get('doc_id', 'N/A'))
-                            found = True
-                            break
+                            match_entry = {
+                                'doc_id': doc_id,
+                                'field': key,
+                                'value': value[:100],
+                                'match': search_str
+                            }
+                            # Avoid duplicate field entries
+                            if not any(m['field'] == key for m in doc_matches[doc_id]):
+                                doc_matches[doc_id].append(match_entry)
                     elif isinstance(value, list):
                         for item in value:
                             if isinstance(item, str):
                                 item_clean = item.lower().replace('.', '').replace(',', '').replace("'", '')
                                 if search_str in item.lower() or search_str_clean in item_clean:
-                                    matched_doc_ids.add(doc.get('doc_id', 'N/A'))
-                                    found = True
-                                    break
-                if found:
-                    break
+                                    match_entry = {
+                                        'doc_id': doc_id,
+                                        'field': key,
+                                        'value': item[:100],
+                                        'match': search_str
+                                    }
+                                    # Avoid duplicate field entries
+                                    if not any(m['field'] == key for m in doc_matches[doc_id]):
+                                        doc_matches[doc_id].append(match_entry)
         
-        # Return complete documents for matched IDs
-        if matched_doc_ids:
-            matched_docs = [doc for doc in docs if doc.get('doc_id') in matched_doc_ids]
-            # Return full documents with all fields
-            results[col_name] = matched_docs
+        if doc_matches:
+            # Flatten all matches - return all fields for all matching docs
+            all_matches = []
+            for doc_id, matches_list in doc_matches.items():
+                all_matches.extend(matches_list)
+            results[col_name] = all_matches
     
     return results
 
@@ -343,27 +357,7 @@ def generate_response(user_query, attempt_chain_head: AttemptNode, firebase_data
                 final_results[col] = matches
         current = current.next_node
     
-    # Truncate large fields to reduce token usage
-    clean_results = {}
-    for col, docs in final_results.items():
-        clean_docs = []
-        for doc in docs:
-            clean_doc = {}
-            for key, value in doc.items():
-                if isinstance(value, str):
-                    # Truncate large strings (like profile images)
-                    if key in ['profilePictureUrl', 'remarks']:
-                        clean_doc[key] = value[:50] if len(value) > 50 else value
-                    else:
-                        clean_doc[key] = value
-                elif isinstance(value, list):
-                    clean_doc[key] = str(value)[:200]
-                else:
-                    clean_doc[key] = value
-            clean_docs.append(clean_doc)
-        clean_results[col] = clean_docs
-    
-    results_text = json.dumps(clean_results, indent=2, default=str)
+    results_text = json.dumps(final_results, indent=2, default=str)
     attempts_text = json.dumps(attempts_info, indent=2)
     
     prompt = f"""You are a helpful chatbot for an IIM event management system.
